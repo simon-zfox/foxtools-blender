@@ -1,198 +1,265 @@
 from . import helpers
-from .properties import FoxToolsProperties
-from bpy.props import StringProperty, IntProperty, EnumProperty, PointerProperty, BoolProperty
-from bpy.types import Panel, Operator, PropertyGroup, UILayout
+from .FTProps import FTProps
+from bpy.types import Operator, ShaderNodeTexImage
 import bpy
 
 
 class AutoBake(Operator):
-    bl_idname = "object.production_bake"
-    bl_label = "Bake Textures"
+    bl_idname = "object.foxtools_autobake"
+    bl_label = "Automatic bake Textures"
+    bl_description = "Automatically bake Diffuse, Normal and Roughness maps from the selected Principled BSDF shader.\n" \
+                     "Intended to be used with materials created by MekTools, an FFXIV model import tool.\n\n" \
+                     "Usually the first (default) Principled BSDF shader is the correct one"
     bl_options = {'REGISTER', 'UNDO'}
 
-    def execute(self, context):
+    # varous attributs of blender file
+    context: bpy.types.Context
+    obj: bpy.types.Object
+    material: bpy.types.Material
+    nodes: bpy.types.NodeTree
+    node_links: bpy.types.NodeLinks
+    props: FTProps
+    source_bsdf: bpy.types.ShaderNodeBsdfPrincipled
+    wm: bpy.types.WindowManager
+    scene: bpy.types.Scene
 
-        props= context.scene.foxToolsProperties
-        obj: bpy.types.Object | None = context.active_object
+    # newly created nodes
+    img_diff: bpy.types.Image
+    img_norm: bpy.types.Image
+    img_rough: bpy.types.Image
+    node_tex_diff: ShaderNodeTexImage
+    node_tex_norm: ShaderNodeTexImage
+    node_tex_rough: ShaderNodeTexImage
+    node_normal_map: bpy.types.ShaderNodeNormalMap
+    node_new_bsdf: bpy.types.ShaderNodeBsdfPrincipled
+    node_switch: bpy.types.GeometryNodeMenuSwitch
 
-        if not obj or not obj.active_material:
-            self.report({'ERROR'}, "No active object/material")
-            return {'CANCELLED'}
+    def init_class_vars(self, context: bpy.types.Context):
+        self.props = FTProps.getprop(context)
+        self.context = context
 
-        mat = obj.active_material
+        if not self.context.active_object or not self.context.active_object.active_material:
+            self.report({'ERROR'}, "Error accessing active object")
+            return False
+        self.obj = self.context.active_object
 
-        if not mat.use_nodes or not mat.node_tree:
+        if not self.context.active_object.active_material:
+            self.report({'ERROR'}, "Error accessing active material")
+            return False
+        self.material = self.context.active_object.active_material
+
+        if not self.context.active_object.active_material.use_nodes or not self.context.active_object.active_material.node_tree:
             self.report({'ERROR'}, "Material does not use nodes")
-            return {'CANCELLED'}
+            return False
 
-        nodes = mat.node_tree.nodes
-        links = mat.node_tree.links
+        if not self.context.active_object.active_material.node_tree:
+            self.report({'ERROR'}, "Material has no nodes")
+            return False
+        self.nodes = self.context.active_object.active_material.node_tree.nodes
 
-        # Rename
-        obj.name = props.base_name
-        obj.data.name = props.base_name
-        mat.name = props.base_name
+        if not self.context.active_object.active_material.node_tree.links:
+            self.report({'ERROR'}, "Material has no node links")
+            return False
+        self.node_links = self.context.active_object.active_material.node_tree.links
 
-        # Cycles Setup
-        helpers.setup_cycles(context)
+        source_bsdf_list = helpers.get_principled_nodes(self.context)
+        source_bsdf = source_bsdf_list[int(self.props.principled_choice)] if source_bsdf_list else None
+        if not source_bsdf:
+            self.report({'ERROR'}, "Could not find source Principled BSDF")
+            return False
+        self.source_bsdf = source_bsdf
 
-        # Cleanup
-        helpers.cleanup_previous_bake(mat)
+        if not self.context.window_manager:
+            self.report({'ERROR'}, "No window manager found")
+            return False
+        self.wm = self.context.window_manager
 
-        # Source Principled
-        principled_nodes = [n for n in nodes if n.type == 'BSDF_PRINCIPLED']
-        if not principled_nodes:
-            self.report({'ERROR'}, "No Principled BSDF found")
-            return {'CANCELLED'}
+        if not self.context.scene:
+            self.report({'ERROR'}, "No scene found")
+            return False
+        self.scene = self.context.scene
 
-        source_bsdf = principled_nodes[int(props.principled_choice)]
+        return True
 
-        # =====================================================
-        # CREATE NODES
-        # =====================================================
+    def create_image(self, suffix) -> bpy.types.Image:
+        return bpy.data.images.new(
+            f"{self.props.base_name}_{suffix}",
+            width=self.props.res_x,
+            height=self.props.res_y,
+            alpha=True
+        )
 
-        # Images
-        def create_image(suffix):
-            return bpy.data.images.new(
-                f"{props.base_name}_{suffix}",
-                width=props.res_x,
-                height=props.res_y,
-                alpha=True
-            )
+    def create_node(self, node_type: str):
+        node = self.nodes.new(node_type)  # pyright: ignore[reportAttributeAccessIssue]
+        node["ft_autobake"] = True  # Mark node as created by this addon for easier cleanup later
+        if not node:
+            self.report({'ERROR'}, f"Error creating node of type {node_type}")
+            raise Exception(f"Error creating node of type {node_type}")
+        return node
 
-        img_diff = create_image("d")
-        img_norm = create_image("n")
-        img_rough = create_image("r")
+    def create_init_nodes(self):
+        self.img_diff = self.create_image("d")
+        self.img_norm = self.create_image("n")
+        self.img_rough = self.create_image("r")
 
-        tex_diff = nodes.new("ShaderNodeTexImage")
-        tex_norm = nodes.new("ShaderNodeTexImage")
-        tex_norm.color_space = 'Non-Color'
-        tex_rough = nodes.new("ShaderNodeTexImage")
+        self.node_tex_diff = self.create_node("ShaderNodeTexImage")
+        self.node_tex_norm = self.create_node("ShaderNodeTexImage")
+        self.node_tex_rough = self.create_node("ShaderNodeTexImage")
 
-        tex_diff.image = img_diff
-        tex_norm.image = img_norm
-        tex_rough.image = img_rough
+        # Set color space to Non-Color for normal and roughness maps
+        if not self.img_norm.colorspace_settings or not self.img_rough.colorspace_settings:
+            self.report({'ERROR'}, "Error accessing image color space settings")
+            return False
+        self.img_norm.colorspace_settings.name = 'Non-Color'
+        self.img_rough.colorspace_settings.name = 'Non-Color'
 
-        normal_map = nodes.new("ShaderNodeNormalMap")
+        self.node_tex_diff.image = self.img_diff
+        self.node_tex_norm.image = self.img_norm
+        self.node_tex_rough.image = self.img_rough
 
-        new_bsdf = nodes.new("ShaderNodeBsdfPrincipled")
+        self.node_normal_map = self.create_node("ShaderNodeNormalMap")
+        self.node_new_bsdf = self.create_node("ShaderNodeBsdfPrincipled")
 
-        # Werte kopieren
-        for input_name in source_bsdf.inputs.keys():
+        # Copy values from source BSDF to new BSDF
+        for input_name in self.source_bsdf.inputs.keys():
             try:
-                new_bsdf.inputs[input_name].default_value = source_bsdf.inputs[input_name].default_value
+                self.node_new_bsdf.inputs[input_name].default_value = self.source_bsdf.inputs[input_name].default_value
             except:
                 pass
 
-        mix_shader = nodes.new("ShaderNodeMixShader")
-        mix_shader["is_bake_switch"] = True
+        self.node_switch = self.create_node("GeometryNodeMenuSwitch")
+        self.node_switch.data_type = 'SHADER'
+        self.node_switch["ft_autobake_switch"] = True
+        self.node_switch.enum_items.clear()
+        self.node_switch.enum_items.new("Original")
+        self.node_switch.enum_items.new("Baked")
 
-        # =====================================================
-        # AUTO-LAYOUT rechts vom gesamten Node-Tree
-        # =====================================================
+        return True
 
-        output = next((n for n in nodes if n.type == 'OUTPUT_MATERIAL'), None)
+    def link_layout_nodes(self):
+        output = next((n for n in self.nodes if n.type == 'OUTPUT_MATERIAL'), None)
+        if not output:
+            self.report({'ERROR'}, "No Material Output node found")
+            return False
 
-        max_x = max(node.location.x for node in nodes)
-        MARGIN_RIGHT = 600
+        before_output_node = next((link.from_node for link in self.node_links if link.to_node ==
+                                  output and link.to_socket.name == "Surface"), None)
+        if not before_output_node:
+            self.report({'ERROR'}, "No node connected to Material Output found")
+            return False
+        before_output_node["ft_autobake_before_output"] = True
+
+        max_x = max(node.location.x for node in self.nodes)
+        MARGIN_RIGHT = 800
         SPACING_X = 350
-        SPACING_Y = 260
+        SPACING_Y = 350
 
         start_x = max_x + MARGIN_RIGHT
-        center_y = output.location.y if output else 0
+        start_y = output.location.y + SPACING_Y
 
-        new_bsdf.location = (start_x, center_y)
-        mix_shader.location = (start_x + SPACING_X, center_y)
+        self.node_new_bsdf.location = (start_x, start_y + SPACING_Y)
+        self.node_switch.location = (start_x + SPACING_X, start_y + SPACING_Y)
+        output.location = (start_x + SPACING_X * 2, start_y + SPACING_Y)
 
-        tex_diff.location = (start_x - SPACING_X * 2, center_y + SPACING_Y)
-        tex_norm.location = (start_x - SPACING_X * 2, center_y)
-        tex_rough.location = (start_x - SPACING_X * 2, center_y - SPACING_Y)
+        self.node_tex_diff.location = (start_x - SPACING_X * 2, start_y + 2 * SPACING_Y)
+        self.node_tex_norm.location = (start_x - SPACING_X * 2, start_y + SPACING_Y)
+        self.node_tex_rough.location = (start_x - SPACING_X * 2, start_y)
 
-        normal_map.location = (start_x - SPACING_X, center_y)
+        self.node_normal_map.location = (start_x - SPACING_X, start_y + SPACING_Y)
 
-        # =====================================================
-        # LINKING
-        # =====================================================
+        # Linking
 
-        links.new(tex_norm.outputs["Color"], normal_map.inputs["Color"])
-        links.new(normal_map.outputs["Normal"], new_bsdf.inputs["Normal"])
+        self.node_links.new(self.node_tex_norm.outputs["Color"], self.node_normal_map.inputs["Color"])
+        self.node_links.new(self.node_normal_map.outputs["Normal"], self.node_new_bsdf.inputs["Normal"])
 
-        links.new(tex_diff.outputs["Color"], new_bsdf.inputs["Base Color"])
-        links.new(tex_diff.outputs["Alpha"], new_bsdf.inputs["Alpha"])
-        links.new(tex_rough.outputs["Color"], new_bsdf.inputs["Roughness"])
+        self.node_links.new(self.node_tex_diff.outputs["Color"], self.node_new_bsdf.inputs["Base Color"])
+        self.node_links.new(self.node_tex_diff.outputs["Alpha"], self.node_new_bsdf.inputs["Alpha"])
+        self.node_links.new(self.node_tex_rough.outputs["Color"], self.node_new_bsdf.inputs["Roughness"])
 
-        if output:
-            links.new(source_bsdf.outputs["BSDF"], mix_shader.inputs[1])
-            links.new(new_bsdf.outputs["BSDF"], mix_shader.inputs[2])
-            links.new(mix_shader.outputs["Shader"], output.inputs["Surface"])
+        self.node_links.new(before_output_node.outputs[0], self.node_switch.inputs["Original"])
+        self.node_links.new(self.node_new_bsdf.outputs["BSDF"], self.node_switch.inputs["Baked"])
+        self.node_links.new(self.node_switch.outputs["Output"], output.inputs["Surface"])
 
-        mix_shader.inputs[0].default_value = 0.0
+        self.node_switch.inputs["Menu"].default_value = "Original"
 
-        # =====================================================
-        # FRAME
-        # =====================================================
+        # Frame
 
-        frame = nodes.new("NodeFrame")
-        frame.label = "BAKE_BLOCK"
+        frame = self.create_node("NodeFrame")
+        frame.label = "FoxTools AutoBake"
         frame.use_custom_color = True
         frame.color = (0.1, 0.6, 0.2)
 
-        for n in [tex_diff, tex_norm, tex_rough, normal_map, new_bsdf, mix_shader]:
+        for n in [self.node_tex_diff, self.node_tex_norm, self.node_tex_rough, self.node_normal_map, self.node_new_bsdf, self.node_switch, output]:
             n.parent = frame
 
-        # =====================================================
-        # BAKE
-        # =====================================================
+        return True
 
-        wm = context.window_manager
-        if wm is None:
-            self.report({'ERROR'}, "No window manager found")
-            return {'CANCELLED'}
-        wm.progress_begin(0, 3)
+    def bake_single(self, tex_node, bake_type):
+        self.nodes.active = tex_node  # pyright: ignore[reportAttributeAccessIssue]
+        bpy.context.view_layer.objects.active = self.obj  # pyright: ignore[reportOptionalMemberAccess]
+        self.obj.select_set(True)
+        bpy.ops.object.bake(type=bake_type)
 
-        scene = context.scene
-        bake_settings = scene.render.bake
+    def bake(self):
+        if not self.scene.render:
+            self.report({'ERROR'}, "No render settings found")
+            return False
+        bake_settings = self.scene.render.bake
+        if not bake_settings:
+            self.report({'ERROR'}, "No bake settings found")
+            return False
 
-        def bake(tex_node, bake_type):
-            nodes.active = tex_node
-            bpy.context.view_layer.objects.active = obj
-            obj.select_set(True)
-            bpy.ops.object.bake(type=bake_type)
-
-        # Diffuse
+        # setup
+        self.wm.progress_begin(0, 3)
         bake_settings.use_pass_direct = False
         bake_settings.use_pass_indirect = False
         bake_settings.use_pass_color = True
 
-        bake(tex_diff, 'DIFFUSE')
-        wm.progress_update(1)
+        self.bake_single(self.node_tex_diff, 'DIFFUSE')
+        self.wm.progress_update(1)
 
-        # Normal
-        bake(tex_norm, 'NORMAL')
-        wm.progress_update(2)
+        self.bake_single(self.node_tex_norm, 'NORMAL')
+        self.wm.progress_update(2)
 
-        # Roughness
-        bake(tex_rough, 'ROUGHNESS')
-        wm.progress_update(3)
+        self.bake_single(self.node_tex_rough, 'ROUGHNESS')
+        self.wm.progress_update(3)
 
-        wm.progress_end()
+        self.wm.progress_end()
+
+        return True
+
+    def execute(self, context):
+        success = self.init_class_vars(context)
+        if not success:
+            return {'CANCELLED'}
+
+        helpers.setup_cycles(self.context)
+
+        # Rename Mesh/Material
+        self.obj.name = self.props.base_name
+        self.obj.data.name = self.props.base_name  # pyright: ignore[reportOptionalMemberAccess]
+        self.material.name = self.props.base_name
+
+        success = self.create_init_nodes()
+        if not success:
+            return {'FINISHED'}
+
+        success = self.link_layout_nodes()
+        if not success:
+            return {'FINISHED'}
+
+        success = self.bake()
+        if not success:
+            return {'FINISHED'}
 
         # Pack Images
-        img_diff.pack()
-        img_norm.pack()
-        img_rough.pack()
+        self.img_diff.pack()
+        self.img_norm.pack()
+        self.img_rough.pack()
 
-        mix_shader.inputs[0].default_value = 1.0
+        # Set switch note show according to current view mode
+        self.node_switch.inputs[0].default_value = "Baked" if self.props.baked_view else "Original"
 
         self.report({'INFO'}, "Bake finished")
+
         return {'FINISHED'}
-
-
-# =========================================================
-# Global Toggle
-# =========================================================
-
-
-# =========================================================
-# UI Panel
-# =========================================================

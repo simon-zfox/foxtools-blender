@@ -1,17 +1,35 @@
+from bpy.types import ShaderNodeBsdfPrincipled
+
+
+from typing import Any, Iterable
+
+
+from bpy.types import ShaderNodeBsdfPrincipled
+
+
 import bpy
-from bpy.types import Panel, Operator, PropertyGroup
+from bpy.types import Panel, Operator, PropertyGroup, ShaderNodeBsdfPrincipled
 from bpy.props import StringProperty, IntProperty, EnumProperty, PointerProperty, BoolProperty
 
 
-def get_principled_nodes(self, context):
-    items = []
+def get_principled_nodes(context: bpy.types.Context) -> list[ShaderNodeBsdfPrincipled]:
+    if not context.active_object:
+        return []
     obj = context.active_object
-    if obj and obj.active_material and obj.active_material.use_nodes:
+
+    if obj and obj.active_material and obj.active_material.use_nodes and obj.active_material.node_tree:
         nodes = obj.active_material.node_tree.nodes
-        principled = [n for n in nodes if n.type == 'BSDF_PRINCIPLED']
-        for i, node in enumerate(principled):
-            items.append((str(i), node.name, ""))
-    return items
+        items: list[ShaderNodeBsdfPrincipled] = [n for n in nodes if n.type == 'BSDF_PRINCIPLED']
+        return items
+
+    return []
+
+
+def get_principled_nodes_str(_, context: bpy.types.Context | None) -> list[tuple[str, str, str]]:
+    if context is None:
+        return []
+    nodes = get_principled_nodes(context)
+    return [(str(i), n.name, "") for i, n in enumerate(nodes)]
 
 
 def setup_cycles(context):
@@ -25,26 +43,3 @@ def setup_cycles(context):
     scene.cycles.adaptive_threshold = 0.01
     scene.cycles.tile_size = 256
 
-
-def cleanup_previous_bake(mat):
-    nodes = mat.node_tree.nodes
-    images_to_remove = []
-
-    for node in list(nodes):
-
-        # Bake Frame entfernen
-        if node.type == 'FRAME' and node.label == "BAKE_BLOCK":
-            for child in list(node.children):
-                if child.type == "TEX_IMAGE" and child.image:
-                    images_to_remove.append(child.image)
-                nodes.remove(child)
-            nodes.remove(node)
-
-        # Mix Shader Switch entfernen
-        if node.type == "MIX_SHADER" and "is_bake_switch" in node:
-            nodes.remove(node)
-
-    # Alte Images löschen wenn unbenutzt
-    for img in images_to_remove:
-        if img.users == 0:
-            bpy.data.images.remove(img)

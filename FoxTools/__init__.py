@@ -12,11 +12,11 @@
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 import bpy
-from bpy.types import Panel, Operator, PropertyGroup, UILayout
-from bpy.props import StringProperty, IntProperty, EnumProperty, PointerProperty, BoolProperty
-from .UIPanel import NPanel, UIToggleBakeView
-from .autoBake import AutoBake
-from .properties import FoxToolsProperties
+
+from .AutoBakeCleanup import AutoBakeCleanup
+from .UIPanel import VIEW3D_PT_NPanel, UIToggleBakeView
+from .AutoBake import AutoBake
+from .FTProps import FTProps
 
 
 bl_info = {
@@ -31,22 +31,22 @@ bl_info = {
 }
 
 
-classes = (
-    FoxToolsProperties,
+classes: tuple = (
+    FTProps,
     AutoBake,
+    AutoBakeCleanup,
     UIToggleBakeView,
-    NPanel,
+    VIEW3D_PT_NPanel,
 )
 
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
-    bpy.types.Scene.foxToolsProperties = PointerProperty(
-        type=FoxToolsProperties)
+    FTProps.setprop()
 
 
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
-    del bpy.types.Scene.foxToolsProperties
+    FTProps.delprop()
