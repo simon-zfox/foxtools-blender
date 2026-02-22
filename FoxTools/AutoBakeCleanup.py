@@ -38,8 +38,8 @@ class AutoBakeCleanup(Operator):
                 break
 
         if output is None or before_output is None:
-            self.report({'ERROR'}, "No nodes found that were created by AutoBake.")
-            return {'CANCELLED'}
+            self.report({'INFO'}, "No nodes found that were created by AutoBake.")
+            return {'FINISHED'}
 
         # reconnect nodes
         links.new(before_output.outputs[0], output.inputs[0])

@@ -40,6 +40,5 @@ def setup_cycles(context):
     scene.cycles.device = 'GPU'
     scene.cycles.samples = 4096
     scene.cycles.preview_samples = 1024
-    scene.cycles.adaptive_threshold = 0.01
+    scene.cycles.adaptive_threshold = 0.1
     scene.cycles.tile_size = 256
-

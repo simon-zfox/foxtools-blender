@@ -198,7 +198,7 @@ class AutoBake(Operator):
         self.nodes.active = tex_node  # pyright: ignore[reportAttributeAccessIssue]
         bpy.context.view_layer.objects.active = self.obj  # pyright: ignore[reportOptionalMemberAccess]
         self.obj.select_set(True)
-        bpy.ops.object.bake(type=bake_type)
+        bpy.ops.object.bake("EXEC_DEFAULT", type=bake_type)
 
     def bake(self):
         if not self.scene.render:
@@ -234,6 +234,9 @@ class AutoBake(Operator):
             return {'CANCELLED'}
 
         helpers.setup_cycles(self.context)
+
+        # Cleanup previous bake nodes if they exist to avoid clutter and potential issues with multiple bakes on the same material
+        bpy.ops.object.foxtools_autobake_cleanup()  # pyright: ignore[reportAttributeAccessIssue]
 
         # Rename Mesh/Material
         self.obj.name = self.props.base_name
